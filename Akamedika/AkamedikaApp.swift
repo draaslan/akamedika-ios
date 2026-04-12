@@ -1,17 +1,18 @@
-//
-//  AkamedikaApp.swift
-//  Akamedika
-//
-//  Created by Abdüssamet Aslan on 12.04.2026.
-//
-
 import SwiftUI
 
 @main
 struct AkamedikaApp: App {
+    @State private var authViewModel = AuthViewModel()
+
     var body: some Scene {
         WindowGroup {
-            ContentView()
+            if authViewModel.isLoggedIn {
+                CourseListView {
+                    authViewModel.logout()
+                }
+            } else {
+                LoginView(viewModel: authViewModel)
+            }
         }
     }
 }
