@@ -2,60 +2,124 @@ import SwiftUI
 
 struct LoginView: View {
     @Bindable var viewModel: AuthViewModel
+    @FocusState private var focusedField: Field?
+
+    enum Field { case username, password }
 
     var body: some View {
-        VStack(spacing: 32) {
-            Spacer()
+        ZStack {
+            backgroundGradient.ignoresSafeArea()
 
-            VStack(spacing: 8) {
-                Image(systemName: "graduationcap.fill")
-                    .font(.system(size: 60))
-                    .foregroundStyle(.tint)
-                Text("Akamedika")
-                    .font(.largeTitle.bold())
-            }
+            ScrollView {
+                VStack(spacing: 28) {
+                    Spacer(minLength: 40)
 
-            VStack(spacing: 16) {
-                TextField("Kullanıcı adı veya e-posta", text: $viewModel.username)
-                    .textContentType(.username)
-                    .autocorrectionDisabled()
-                    .textInputAutocapitalization(.never)
-                    .padding()
-                    .background(.fill.tertiary)
-                    .clipShape(RoundedRectangle(cornerRadius: 12))
+                    Image("akamedika-logo-beyaz")
+                        .resizable()
+                        .scaledToFit()
+                        .frame(height: 72)
+                        .padding(.bottom, 8)
 
-                SecureField("Şifre", text: $viewModel.password)
-                    .textContentType(.password)
-                    .padding()
-                    .background(.fill.tertiary)
-                    .clipShape(RoundedRectangle(cornerRadius: 12))
-            }
+                    VStack(spacing: 6) {
+                        Text("Hoş geldiniz")
+                            .font(.title2.bold())
+                            .foregroundStyle(Theme.textPrimary)
+                        Text("Öğrenmeye devam etmek için giriş yapın")
+                            .font(.subheadline)
+                            .foregroundStyle(Theme.textSecondary)
+                    }
 
-            if let error = viewModel.errorMessage {
-                Text(error)
-                    .foregroundStyle(.red)
-                    .font(.callout)
-                    .multilineTextAlignment(.center)
-            }
+                    VStack(spacing: 14) {
+                        inputField(
+                            icon: "person.fill",
+                            placeholder: "Kullanıcı adı veya e-posta",
+                            text: $viewModel.username,
+                            isSecure: false,
+                            field: .username
+                        )
+                        .textContentType(.username)
+                        .autocorrectionDisabled()
+                        .textInputAutocapitalization(.never)
 
-            Button {
-                Task { await viewModel.login() }
-            } label: {
-                if viewModel.isLoading {
-                    ProgressView()
+                        inputField(
+                            icon: "lock.fill",
+                            placeholder: "Şifre",
+                            text: $viewModel.password,
+                            isSecure: true,
+                            field: .password
+                        )
+                        .textContentType(.password)
+                    }
+
+                    if let error = viewModel.errorMessage {
+                        Text(error)
+                            .foregroundStyle(.red)
+                            .font(.callout)
+                            .multilineTextAlignment(.center)
+                    }
+
+                    Button {
+                        focusedField = nil
+                        Task { await viewModel.login() }
+                    } label: {
+                        ZStack {
+                            if viewModel.isLoading {
+                                ProgressView()
+                                    .tint(.white)
+                            } else {
+                                Text("Giriş Yap")
+                                    .font(.headline)
+                                    .foregroundStyle(.white)
+                            }
+                        }
                         .frame(maxWidth: .infinity)
+                        .padding(.vertical, 16)
+                        .background(Theme.accentGradient)
+                        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                    }
+                    .disabled(viewModel.isLoading)
+
+                    Spacer(minLength: 20)
+                }
+                .padding(.horizontal, 24)
+            }
+        }
+    }
+
+    private var backgroundGradient: some View {
+        LinearGradient(
+            colors: [Theme.background, Color(red: 0.06, green: 0.08, blue: 0.14), Theme.background],
+            startPoint: .top,
+            endPoint: .bottom
+        )
+    }
+
+    @ViewBuilder
+    private func inputField(icon: String, placeholder: String, text: Binding<String>, isSecure: Bool, field: Field) -> some View {
+        HStack(spacing: 12) {
+            Image(systemName: icon)
+                .foregroundStyle(Theme.textSecondary)
+                .frame(width: 20)
+            Group {
+                if isSecure {
+                    SecureField(placeholder, text: text)
                 } else {
-                    Text("Giriş Yap")
-                        .font(.headline)
-                        .frame(maxWidth: .infinity)
+                    TextField(placeholder, text: text)
                 }
             }
-            .buttonStyle(.borderedProminent)
-            .controlSize(.large)
-            .disabled(viewModel.isLoading)
-
-            Spacer()
+            .foregroundStyle(Theme.textPrimary)
+            .focused($focusedField, equals: field)
         }
-        .padding(.horizontal, 24)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 14)
+        .background(Theme.surface)
+        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .strokeBorder(
+                    focusedField == field ? Theme.accent.opacity(0.6) : Theme.border,
+                    lineWidth: 1
+                )
+        )
     }
 }

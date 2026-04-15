@@ -6,13 +6,17 @@ struct AkamedikaApp: App {
 
     var body: some Scene {
         WindowGroup {
-            if authViewModel.isLoggedIn {
-                CourseListView {
-                    authViewModel.logout()
+            Group {
+                if authViewModel.isLoggedIn {
+                    CourseListView {
+                        authViewModel.logout()
+                    }
+                } else {
+                    LoginView(viewModel: authViewModel)
                 }
-            } else {
-                LoginView(viewModel: authViewModel)
             }
+            .preferredColorScheme(.dark)
+            .tint(Theme.accent)
         }
     }
 }

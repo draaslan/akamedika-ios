@@ -12,6 +12,9 @@ final class AuthViewModel {
 
     init() {
         isLoggedIn = APIClient.shared.token != nil
+        if isLoggedIn, AuthService.currentUserId == nil {
+            Task { await authService.fetchAndCacheUserId() }
+        }
     }
 
     func login() async {
