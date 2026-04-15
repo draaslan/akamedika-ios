@@ -58,25 +58,26 @@ struct SquareThumbnail<Content: View>: View {
 }
 
 /// Helper that loads a remote image and always fills its container, cropped.
+/// Pass `isLoading: true` to render the shimmer even when `url` is still nil
+/// (e.g. a featured-media ID is being resolved upstream).
+///
+/// Backed by `CachedAsyncImage` rather than SwiftUI's `AsyncImage` because the
+/// latter is unreliable inside `LazyVGrid`: cells that scroll into view late
+/// often never resolve their image. The cached loader uses URLSession + an
+/// in-memory cache keyed by URL, so each image is fetched at most once and
+/// late-appearing cells reliably trigger their own load.
 struct FillingAsyncImage<Placeholder: View>: View {
     let url: URL?
+    var isLoading: Bool = false
     @ViewBuilder var placeholder: () -> Placeholder
 
     var body: some View {
         GeometryReader { geo in
             Group {
                 if let url {
-                    AsyncImage(url: url) { phase in
-                        switch phase {
-                        case .success(let image):
-                            image
-                                .resizable()
-                                .scaledToFill()
-                                .frame(width: geo.size.width, height: geo.size.height)
-                        default:
-                            placeholder()
-                        }
-                    }
+                    CachedAsyncImage(url: url, placeholder: placeholder)
+                } else if isLoading {
+                    ThumbnailShimmer()
                 } else {
                     placeholder()
                 }
@@ -84,6 +85,83 @@ struct FillingAsyncImage<Placeholder: View>: View {
             .frame(width: geo.size.width, height: geo.size.height)
             .clipped()
         }
+    }
+}
+
+/// Process-wide image cache. NSCache evicts on memory pressure automatically.
+final class ImageCache {
+    static let shared = ImageCache()
+    private let cache = NSCache<NSURL, UIImage>()
+    private init() { cache.countLimit = 200 }
+
+    func image(for url: URL) -> UIImage? { cache.object(forKey: url as NSURL) }
+    func store(_ image: UIImage, for url: URL) { cache.setObject(image, forKey: url as NSURL) }
+}
+
+/// Loads a remote image via URLSession with an in-memory cache. Renders a
+/// shimmer while loading and falls back to the supplied placeholder on
+/// failure. Uses `.task(id: url)` so cell reuse in lazy containers re-triggers
+/// the load instead of getting stuck.
+struct CachedAsyncImage<Placeholder: View>: View {
+    let url: URL
+    @ViewBuilder var placeholder: () -> Placeholder
+
+    @State private var image: UIImage?
+    @State private var failed = false
+
+    var body: some View {
+        GeometryReader { geo in
+            Group {
+                if let image {
+                    Image(uiImage: image)
+                        .resizable()
+                        .scaledToFill()
+                        .frame(width: geo.size.width, height: geo.size.height)
+                } else if failed {
+                    placeholder()
+                } else {
+                    ThumbnailShimmer()
+                }
+            }
+            .frame(width: geo.size.width, height: geo.size.height)
+            .clipped()
+        }
+        .task(id: url) {
+            await load()
+        }
+    }
+
+    private func load() async {
+        if let cached = ImageCache.shared.image(for: url) {
+            image = cached
+            return
+        }
+        image = nil
+        failed = false
+        do {
+            var request = URLRequest(url: url)
+            request.setValue("1", forHTTPHeaderField: "ngrok-skip-browser-warning")
+            let (data, response) = try await URLSession.shared.data(for: request)
+            guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode),
+                  let ui = UIImage(data: data) else {
+                failed = true
+                return
+            }
+            ImageCache.shared.store(ui, for: url)
+            if !Task.isCancelled { image = ui }
+        } catch {
+            if !Task.isCancelled { failed = true }
+        }
+    }
+}
+
+/// A solid, shimmering rectangle sized to fill its container. Used as the
+/// loading placeholder for any remote thumbnail.
+struct ThumbnailShimmer: View {
+    var body: some View {
+        Rectangle()
+            .fill(Theme.surfaceElevated)
+            .shimmering()
     }
 }
 

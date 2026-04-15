@@ -59,6 +59,8 @@ struct LessonDetailView: View {
                             switch phase {
                             case .success(let image):
                                 image.resizable().aspectRatio(contentMode: .fill)
+                            case .empty:
+                                ThumbnailShimmer()
                             default:
                                 Theme.surface
                             }
