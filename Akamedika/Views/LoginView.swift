@@ -17,7 +17,8 @@ struct LoginView: View {
                     Image("akamedika-logo-beyaz")
                         .resizable()
                         .scaledToFit()
-                        .frame(height: 72)
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 64)
                         .padding(.bottom, 8)
 
                     VStack(spacing: 6) {
@@ -83,6 +84,11 @@ struct LoginView: View {
                 }
                 .padding(.horizontal, 24)
             }
+        }
+        .alert("Oturum Süresi Doldu", isPresented: $viewModel.sessionExpired) {
+            Button("Tamam", role: .cancel) {}
+        } message: {
+            Text("Oturumunuzun süresi doldu. Lütfen tekrar giriş yapın.")
         }
     }
 

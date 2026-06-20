@@ -7,6 +7,8 @@ final class AuthViewModel {
     var errorMessage: String?
     var username = ""
     var password = ""
+    /// Set when the session expired mid-use; drives the re-login alert.
+    var sessionExpired = false
 
     private let authService = AuthService()
 
@@ -15,6 +17,19 @@ final class AuthViewModel {
         if isLoggedIn, AuthService.currentUserId == nil {
             Task { await authService.fetchAndCacheUserId() }
         }
+        // Force a re-login whenever any request reports an expired/invalid token.
+        APIClient.shared.onSessionExpired = { [weak self] in
+            Task { @MainActor in self?.handleSessionExpired() }
+        }
+    }
+
+    @MainActor
+    private func handleSessionExpired() {
+        guard isLoggedIn else { return }  // ignore if already logged out
+        authService.logout()
+        isLoggedIn = false
+        password = ""
+        sessionExpired = true
     }
 
     func login() async {

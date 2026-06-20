@@ -41,7 +41,9 @@ struct CourseListView: View {
                 }
             }
             .navigationDestination(for: Course.self) { course in
-                LessonListView(course: course)
+                LessonListView(course: course) { newProgress in
+                    viewModel.updateCourseProgress(courseId: course.id, progress: newProgress)
+                }
             }
             .navigationDestination(for: ProfileDestination.self) { _ in
                 ProfileView(onLogout: onLogout)
@@ -89,7 +91,7 @@ struct CourseListView: View {
                 .multilineTextAlignment(.center)
                 .padding(.horizontal, 40)
             Button {
-                Task { await viewModel.fetchCourses() }
+                Task { await viewModel.fetchCourses(force: true) }
             } label: {
                 Text("Tekrar Dene")
                     .font(.subheadline.bold())
@@ -150,7 +152,7 @@ struct CourseListView: View {
             }
         }
         .refreshable {
-            await viewModel.fetchCourses()
+            await viewModel.fetchCourses(force: true)
         }
     }
 }

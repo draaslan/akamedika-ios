@@ -23,15 +23,22 @@ struct CourseStepIDs: Decodable {
         var resolvedID: Int? { id ?? ID ?? step }
     }
 
+    /// Extracts an ID from "123" or a prefixed "sfwd-lessons:123" form.
+    static func trailingInt(_ s: String) -> Int? {
+        if let i = Int(s) { return i }
+        if let last = s.split(separator: ":").last { return Int(last) }
+        return nil
+    }
+
     init(from decoder: Decoder) throws {
         // Flat array of ints
         if let arr = try? decoder.singleValueContainer().decode([Int].self) {
             orderedIDs = arr
             return
         }
-        // Array of ID strings
+        // Array of ID strings — may be plain ("123") or prefixed ("sfwd-lessons:123")
         if let arr = try? decoder.singleValueContainer().decode([String].self) {
-            orderedIDs = arr.compactMap { Int($0) }
+            orderedIDs = arr.compactMap { Self.trailingInt($0) }
             return
         }
         // Array of objects {id|ID|step}
@@ -469,7 +476,7 @@ struct LearnDashService {
 
     /// Fetches lessons (and topics) for a course, preserving LearnDash order.
     /// Merges completion from both outline walk and summary endpoint for safety.
-    func fetchCourseContent(courseId: Int) async throws -> (lessons: [Lesson], topics: [Int: [Topic]], completed: Set<Int>) {
+    func fetchCourseContent(courseId: Int) async throws -> (lessons: [Lesson], topics: [Int: [Topic]], completed: Set<Int>, progress: CourseProgress?) {
         let userId = AuthService.currentUserId
         let outline = await fetchCourseOutline(courseId: courseId, userId: userId)
         let lessonIDs = outline.lessonIDs
@@ -477,22 +484,30 @@ struct LearnDashService {
 
         async let lessonsTask: [Lesson] = fetchLessonsByIDs(lessonIDs, courseId: courseId)
         async let topicsTask: [Int: Topic] = fetchTopicsByIDs(allTopicIDs)
-        async let summaryCompletedTask: Set<Int> = {
-            guard let userId else { return [] }
-            return await fetchProgressResponse(userId: userId, courseId: courseId)?.completedLessonIDs ?? []
+        // Single progress request, reused for BOTH the completed set and the
+        // course progress bar — avoids a second round-trip in the view model.
+        async let progressTask: CourseProgressResponse? = {
+            guard let userId else { return nil }
+            return await fetchProgressResponse(userId: userId, courseId: courseId)
         }()
 
         let lessons = try await lessonsTask
         let topicsByID = await topicsTask
-        let summaryCompleted = await summaryCompletedTask
+        let progressResponse = await progressTask
 
         var topicsByLesson: [Int: [Topic]] = [:]
         for (lessonID, tIDs) in outline.topicsByLesson {
             let ordered = tIDs.compactMap { topicsByID[$0] }
             if !ordered.isEmpty { topicsByLesson[lessonID] = ordered }
         }
-        let completed = outline.completedIDs.union(summaryCompleted)
-        return (lessons, topicsByLesson, completed)
+        let completed = outline.completedIDs.union(progressResponse?.completedLessonIDs ?? [])
+        let courseProgress: CourseProgress? = {
+            if let c = progressResponse?.completed, let t = progressResponse?.total, t > 0 {
+                return CourseProgress(completed: c, total: t)
+            }
+            return nil
+        }()
+        return (lessons, topicsByLesson, completed, courseProgress)
     }
 
     private func fetchLessonsByIDs(_ ids: [Int], courseId: Int) async throws -> [Lesson] {
@@ -569,6 +584,34 @@ struct LearnDashService {
         return nil
     }
 
+    /// One row of the batched user-progress list. The collection form of
+    /// `/ldlms/v2/users/{id}/course-progress` (no course id) returns every
+    /// enrolled course's totals in a single response.
+    private struct UserCourseProgressRow: Decodable {
+        let course: Int
+        let stepsTotal: Int?
+        let stepsCompleted: Int?
+        enum CodingKeys: String, CodingKey {
+            case course
+            case stepsTotal = "steps_total"
+            case stepsCompleted = "steps_completed"
+        }
+    }
+
+    /// Fetches progress for ALL of the user's courses in ONE request instead of
+    /// one request per course. Returns a map of courseID → progress.
+    func fetchAllCourseProgress(userId: Int) async -> [Int: CourseProgress] {
+        let rows: [UserCourseProgressRow] = (try? await client.request(
+            "/ldlms/v2/users/\(userId)/course-progress?per_page=100"
+        )) ?? []
+        var result: [Int: CourseProgress] = [:]
+        for row in rows {
+            guard let total = row.stepsTotal, total > 0 else { continue }
+            result[row.course] = CourseProgress(completed: row.stepsCompleted ?? 0, total: total)
+        }
+        return result
+    }
+
     /// Batch fetch: returns both progress totals and the exact set of completed
     /// lesson IDs. Uses the per-step progress endpoint which returns one object
     /// per step with status and post_type — the reliable source for completion.
@@ -599,12 +642,22 @@ struct LearnDashService {
         return (progress, completed)
     }
 
-    func markLessonComplete(userId: Int, lessonId: Int) async throws {
-        let _: EmptyResponse = try await client.request(
-            "/ldlms/v2/users/\(userId)/lessons/\(lessonId)",
-            method: "POST",
-            body: ["status": "complete"]
+    struct MarkCompleteResponse: Decodable {
+        let success: Bool
+        let completed: Bool
+    }
+
+    /// Marks a lesson OR topic complete. LearnDash's REST API exposes no
+    /// completion endpoint, so this calls our custom `akamedika/v1` route which
+    /// runs `learndash_process_mark_complete()` server-side. Returns whether the
+    /// item is now actually complete.
+    @discardableResult
+    func markComplete(userId: Int, postId: Int) async throws -> Bool {
+        let r: MarkCompleteResponse = try await client.request(
+            "/akamedika/v1/users/\(userId)/complete/\(postId)",
+            method: "POST"
         )
+        return r.completed
     }
 }
 

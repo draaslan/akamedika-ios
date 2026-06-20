@@ -1,8 +1,11 @@
 import SwiftUI
 import WebKit
+import AVFoundation
 
 struct LessonDetailView: View {
     let lesson: Lesson
+    var index: Int = 0
+    var total: Int = 0
     let isCompleted: Bool
     var onCompletionChanged: () async -> Void = {}
 
@@ -39,7 +42,7 @@ struct LessonDetailView: View {
                 }
             }
         }
-        .navigationTitle(lesson.displayTitle)
+        .navigationTitle("Ders")
         .navigationBarTitleDisplayMode(.inline)
         .toolbarBackground(Theme.background, for: .navigationBar)
         .toolbarBackground(.visible, for: .navigationBar)
@@ -50,53 +53,82 @@ struct LessonDetailView: View {
     }
 
     private func content(detail: Lesson) -> some View {
-        VStack(spacing: 0) {
+        let parsed = PrestoContent.parse(detail.htmlContent)
+        return VStack(spacing: 0) {
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
-                    if let urlString = detail.featuredMediaURL ?? lesson.featuredMediaURL,
-                       let url = URL(string: urlString) {
-                        AsyncImage(url: url) { phase in
-                            switch phase {
-                            case .success(let image):
-                                image.resizable().aspectRatio(contentMode: .fill)
-                            case .empty:
-                                ThumbnailShimmer()
-                            default:
-                                Theme.surface
+                    HStack(alignment: .top, spacing: 12) {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text(detail.displayTitle)
+                                .font(.title2.bold())
+                                .foregroundStyle(Theme.textPrimary)
+                                .fixedSize(horizontal: false, vertical: true)
+
+                            if displayCompleted {
+                                Label("Tamamlandı", systemImage: "checkmark.seal.fill")
+                                    .font(.caption.bold())
+                                    .foregroundStyle(Theme.success)
+                                    .padding(.horizontal, 10)
+                                    .padding(.vertical, 5)
+                                    .background(Theme.success.opacity(0.15))
+                                    .clipShape(Capsule())
                             }
                         }
-                        .frame(height: 200)
-                        .frame(maxWidth: .infinity)
-                        .clipped()
-                    }
+                        .frame(maxWidth: .infinity, alignment: .leading)
 
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text(detail.displayTitle)
-                            .font(.title2.bold())
-                            .foregroundStyle(Theme.textPrimary)
-
-                        if displayCompleted {
-                            Label("Tamamlandı", systemImage: "checkmark.seal.fill")
-                                .font(.caption.bold())
-                                .foregroundStyle(Theme.success)
-                                .padding(.horizontal, 10)
-                                .padding(.vertical, 5)
-                                .background(Theme.success.opacity(0.15))
-                                .clipShape(Capsule())
+                        if let urlString = detail.featuredMediaURL ?? lesson.featuredMediaURL,
+                           let url = URL(string: urlString) {
+                            AsyncImage(url: url) { phase in
+                                switch phase {
+                                case .success(let image):
+                                    image.resizable().aspectRatio(contentMode: .fill)
+                                case .empty:
+                                    ThumbnailShimmer()
+                                default:
+                                    Theme.surface
+                                }
+                            }
+                            .frame(width: 120, height: 68)
+                            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
                         }
                     }
                     .padding(.horizontal, 20)
+                    .padding(.top, 8)
 
-                    HTMLContentView(html: detail.htmlContent, dynamicHeight: $contentHeight)
+                    ForEach(parsed.videos) { video in
+                        PrestoVideoView(
+                            video: video,
+                            title: detail.displayTitle,
+                            artworkURL: (detail.featuredMediaURL ?? lesson.featuredMediaURL)
+                                .flatMap { URL(string: $0) }
+                        )
+                    }
+
+                    HTMLContentView(html: parsed.cleanedHTML, dynamicHeight: $contentHeight)
                         .frame(height: contentHeight)
                 }
                 .padding(.bottom, 100)
             }
 
+            footer
+        }
+    }
+
+    private var footer: some View {
+        VStack(spacing: 10) {
             if !displayCompleted {
                 completeButton
             }
+            LessonNavRow(index: index, total: total)
         }
+        .padding(.horizontal, 16)
+        .padding(.top, 10)
+        .padding(.bottom, 16)
+        .background(
+            Theme.background
+                .shadow(color: .black.opacity(0.4), radius: 12, y: -6)
+                .ignoresSafeArea(edges: .bottom)
+        )
     }
 
     private var completeButton: some View {
@@ -119,26 +151,68 @@ struct LessonDetailView: View {
             .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
         }
         .disabled(isMarking)
-        .padding(.horizontal, 16)
-        .padding(.bottom, 16)
-        .background(
-            Theme.background
-                .shadow(color: .black.opacity(0.4), radius: 12, y: -6)
-                .ignoresSafeArea(edges: .bottom)
-        )
     }
 
     private func markComplete() async {
         guard let userId = AuthService.currentUserId else { return }
         isMarking = true
         do {
-            try await LearnDashService().markLessonComplete(userId: userId, lessonId: lesson.id)
-            locallyCompleted = true
-            await onCompletionChanged()
+            let completed = try await LearnDashService().markComplete(userId: userId, postId: lesson.id)
+            if completed {
+                locallyCompleted = true
+                await onCompletionChanged()
+            }
         } catch {
-            // Silently fail
+            // Keep the button so the user can retry.
         }
         isMarking = false
+    }
+}
+
+/// Previous / Next bar shared by the lesson and topic detail screens. Pushes the
+/// adjacent content item onto the navigation stack via `ContentNav`.
+struct LessonNavRow: View {
+    let index: Int
+    let total: Int
+
+    var body: some View {
+        HStack(spacing: 12) {
+            navLink(title: "Önceki", systemImage: "chevron.left",
+                    targetIndex: index - 1, enabled: index > 0, trailingIcon: false)
+            navLink(title: "Sonraki", systemImage: "chevron.right",
+                    targetIndex: index + 1, enabled: index < total - 1, trailingIcon: true)
+        }
+    }
+
+    @ViewBuilder
+    private func navLink(title: String, systemImage: String, targetIndex: Int, enabled: Bool, trailingIcon: Bool) -> some View {
+        if enabled {
+            NavigationLink(value: ContentNav(index: targetIndex)) {
+                label(title: title, systemImage: systemImage, trailingIcon: trailingIcon, dim: false)
+            }
+            .buttonStyle(.plain)
+        } else {
+            label(title: title, systemImage: systemImage, trailingIcon: trailingIcon, dim: true)
+        }
+    }
+
+    private func label(title: String, systemImage: String, trailingIcon: Bool, dim: Bool) -> some View {
+        HStack(spacing: 6) {
+            if !trailingIcon { Image(systemName: systemImage).font(.footnote.bold()) }
+            Text(title).font(.subheadline.weight(.semibold))
+            if trailingIcon { Image(systemName: systemImage).font(.footnote.bold()) }
+        }
+        .foregroundStyle(dim ? Theme.textSecondary.opacity(0.35) : Theme.textPrimary)
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 13)
+        .background(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(Theme.surface)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .strokeBorder(Theme.border, lineWidth: 1)
+        )
     }
 }
 
@@ -149,6 +223,14 @@ struct HTMLContentView: UIViewRepresentable {
     func makeCoordinator() -> Coordinator { Coordinator(height: $dynamicHeight) }
 
     func makeUIView(context: Context) -> WKWebView {
+        // Activate a playback audio session so the lesson video keeps playing when
+        // the device is locked or backgrounded (paired with the `audio` background
+        // mode). Just setting the category isn't enough — the session must be made
+        // active for WebKit to keep the media running off-screen.
+        let session = AVAudioSession.sharedInstance()
+        try? session.setCategory(.playback, mode: .moviePlayback)
+        try? session.setActive(true)
+
         let config = WKWebViewConfiguration()
         config.allowsInlineMediaPlayback = true
         config.mediaTypesRequiringUserActionForPlayback = []
@@ -175,6 +257,9 @@ struct HTMLContentView: UIViewRepresentable {
         <html>
         <head>
         <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+        <!-- Bunny.net token auth validates the referrer; send our origin on the
+             cross-origin HLS/segment requests so the signed stream authorizes. -->
+        <meta name="referrer" content="origin">
         <style>
             :root { color-scheme: dark; }
             html, body { background: transparent; margin: 0; padding: 0; }
@@ -219,13 +304,89 @@ struct HTMLContentView: UIViewRepresentable {
                 width: 100% !important; height: 100% !important; border: 0;
             }
             iframe, video, embed, object { max-width: 100%; }
+            .video-wrapper video { background: #000; }
         </style>
         </head>
-        <body>\(processed)</body>
+        <body>\(processed)
+        <script>\(Self.prestoScript)</script>
+        </body>
         </html>
         """
         webView.loadHTMLString(styledHTML, baseURL: URL(string: "https://akamedika.com"))
     }
+
+    /// Presto Player renders its videos as a `<presto-player>` web component that
+    /// only hydrates when Presto's own JS bundle is loaded — which it isn't inside
+    /// our bare WKWebView, so the video never appears. The real source lives in the
+    /// element's attributes: Bunny.net streams as a signed HLS (`.m3u8`) URL in
+    /// `src`, YouTube/Vimeo as a provider id. iOS plays HLS natively in a `<video>`
+    /// tag (exactly what Safari does on the site), so we swap each presto-player for
+    /// a native player / provider iframe. The signed Bunny token is minted fresh by
+    /// WordPress on every content fetch, so it's valid when this runs.
+    static let prestoScript = """
+    (function(){
+      function wrap(el){
+        var w = document.createElement('div');
+        w.className = 'video-wrapper';
+        w.appendChild(el);
+        return w;
+      }
+      function youtubeId(p){
+        var v = p.getAttribute('provider-video-id');
+        if (v) return v;
+        try {
+          var ba = JSON.parse(p.getAttribute('block-attributes') || '{}');
+          var m = String(ba.src || '').match(/(?:youtu\\.be\\/|[?&]v=|embed\\/)([A-Za-z0-9_-]{6,})/);
+          if (m) return m[1];
+        } catch (e) {}
+        return '';
+      }
+      function iframe(url){
+        var f = document.createElement('iframe');
+        f.setAttribute('src', url);
+        f.setAttribute('allowfullscreen', '');
+        f.setAttribute('allow', 'autoplay; encrypted-media; picture-in-picture');
+        return f;
+      }
+      function convert(p){
+        var cls = ((p.closest('figure') ? p.closest('figure').className : '') + ' ' + (p.className || ''));
+        var node;
+        if (/presto-provider-youtube/.test(cls)) {
+          var yid = youtubeId(p);
+          if (!yid) return;
+          node = iframe('https://www.youtube.com/embed/' + yid);
+        } else if (/presto-provider-vimeo/.test(cls)) {
+          var vid = p.getAttribute('provider-video-id') || '';
+          if (!vid) return;
+          node = iframe('https://player.vimeo.com/video/' + vid);
+        } else {
+          var src = p.getAttribute('src') || '';
+          if (!src) return;
+          var video = document.createElement('video');
+          video.setAttribute('controls', '');
+          video.setAttribute('playsinline', '');
+          video.setAttribute('webkit-playsinline', '');
+          video.setAttribute('preload', 'metadata');
+          var poster = p.getAttribute('poster');
+          if (poster) video.setAttribute('poster', poster);
+          var source = document.createElement('source');
+          source.setAttribute('src', src);
+          if (src.indexOf('.m3u8') !== -1) source.setAttribute('type', 'application/vnd.apple.mpegurl');
+          else if (src.indexOf('.mp4') !== -1) source.setAttribute('type', 'video/mp4');
+          video.appendChild(source);
+          node = video;
+        }
+        var target = p.closest('figure.presto-block-video') || p.closest('figure') || p;
+        if (target.parentNode) target.parentNode.replaceChild(wrap(node), target);
+      }
+      function run(){
+        var list = document.querySelectorAll('presto-player');
+        for (var i = 0; i < list.length; i++) { try { convert(list[i]); } catch (e) {} }
+      }
+      if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', run);
+      else run();
+    })();
+    """
 
     static func processEmbeds(_ raw: String) -> String {
         var s = raw

@@ -2,6 +2,8 @@ import SwiftUI
 
 struct TopicDetailView: View {
     let topic: Topic
+    var index: Int = 0
+    var total: Int = 0
     let isCompleted: Bool
     var onCompletionChanged: () async -> Void = {}
 
@@ -38,7 +40,7 @@ struct TopicDetailView: View {
                 content
             }
         }
-        .navigationTitle(topic.displayTitle)
+        .navigationTitle("Ders")
         .navigationBarTitleDisplayMode(.inline)
         .toolbarBackground(Theme.background, for: .navigationBar)
         .toolbarBackground(.visible, for: .navigationBar)
@@ -49,7 +51,8 @@ struct TopicDetailView: View {
     }
 
     private var content: some View {
-        VStack(spacing: 0) {
+        let parsed = PrestoContent.parse(htmlContent)
+        return VStack(spacing: 0) {
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
                     VStack(alignment: .leading, spacing: 8) {
@@ -70,16 +73,35 @@ struct TopicDetailView: View {
                     .padding(.horizontal, 20)
                     .padding(.top, 16)
 
-                    HTMLContentView(html: htmlContent, dynamicHeight: $contentHeight)
+                    ForEach(parsed.videos) { video in
+                        PrestoVideoView(video: video, title: topic.displayTitle)
+                    }
+
+                    HTMLContentView(html: parsed.cleanedHTML, dynamicHeight: $contentHeight)
                         .frame(height: contentHeight)
                 }
                 .padding(.bottom, 100)
             }
 
+            footer
+        }
+    }
+
+    private var footer: some View {
+        VStack(spacing: 10) {
             if !displayCompleted {
                 completeButton
             }
+            LessonNavRow(index: index, total: total)
         }
+        .padding(.horizontal, 16)
+        .padding(.top, 10)
+        .padding(.bottom, 16)
+        .background(
+            Theme.background
+                .shadow(color: .black.opacity(0.4), radius: 12, y: -6)
+                .ignoresSafeArea(edges: .bottom)
+        )
     }
 
     private var completeButton: some View {
@@ -91,7 +113,7 @@ struct TopicDetailView: View {
                     ProgressView().tint(.white)
                 } else {
                     Image(systemName: "checkmark.circle.fill")
-                    Text("Tamamla")
+                    Text("Dersi Tamamla")
                         .font(.headline)
                 }
             }
@@ -102,13 +124,6 @@ struct TopicDetailView: View {
             .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
         }
         .disabled(isMarking)
-        .padding(.horizontal, 16)
-        .padding(.bottom, 16)
-        .background(
-            Theme.background
-                .shadow(color: .black.opacity(0.4), radius: 12, y: -6)
-                .ignoresSafeArea(edges: .bottom)
-        )
     }
 
     private func loadContent() async {
@@ -130,9 +145,14 @@ struct TopicDetailView: View {
         guard let userId = AuthService.currentUserId else { return }
         isMarking = true
         defer { isMarking = false }
-        struct Empty: Decodable {}
-        _ = try? await APIClient.shared.request("/ldlms/v2/users/\(userId)/topics/\(topic.id)", method: "POST", body: ["status": "complete"]) as Empty
-        locallyCompleted = true
-        await onCompletionChanged()
+        do {
+            let completed = try await LearnDashService().markComplete(userId: userId, postId: topic.id)
+            if completed {
+                locallyCompleted = true
+                await onCompletionChanged()
+            }
+        } catch {
+            // Keep the button so the user can retry.
+        }
     }
 }

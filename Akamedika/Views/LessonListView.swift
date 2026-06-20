@@ -2,6 +2,7 @@ import SwiftUI
 
 struct LessonListView: View {
     let course: Course
+    var onProgressChanged: (CourseProgress) -> Void = { _ in }
     @State private var viewModel = LessonListViewModel()
 
     var body: some View {
@@ -57,17 +58,31 @@ struct LessonListView: View {
         .toolbarBackground(Theme.background, for: .navigationBar)
         .toolbarBackground(.visible, for: .navigationBar)
         .toolbarColorScheme(.dark, for: .navigationBar)
-        .navigationDestination(for: Lesson.self) { lesson in
-            LessonDetailView(lesson: lesson, isCompleted: viewModel.completedIDs.contains(lesson.id)) {
-                await viewModel.fetchLessons(courseId: course.id)
-            }
-        }
-        .navigationDestination(for: TopicDestination.self) { dest in
-            TopicDetailView(
-                topic: dest.topic,
-                isCompleted: viewModel.completedIDs.contains(dest.topic.id)
-            ) {
-                await viewModel.fetchLessons(courseId: course.id)
+        .navigationDestination(for: ContentNav.self) { nav in
+            let items = viewModel.orderedItems
+            if nav.index >= 0, nav.index < items.count {
+                switch items[nav.index] {
+                case .lesson(let lesson):
+                    LessonDetailView(
+                        lesson: lesson,
+                        index: nav.index,
+                        total: items.count,
+                        isCompleted: viewModel.completedIDs.contains(lesson.id)
+                    ) {
+                        viewModel.markCompletedLocally(id: lesson.id)
+                        onProgressChanged(viewModel.progress)
+                    }
+                case .topic(let topic):
+                    TopicDetailView(
+                        topic: topic,
+                        index: nav.index,
+                        total: items.count,
+                        isCompleted: viewModel.completedIDs.contains(topic.id)
+                    ) {
+                        viewModel.markCompletedLocally(id: topic.id)
+                        onProgressChanged(viewModel.progress)
+                    }
+                }
             }
         }
         .task {
@@ -88,7 +103,8 @@ struct LessonListView: View {
                             index: index + 1,
                             lesson: lesson,
                             topics: viewModel.topicsByLesson[lesson.id] ?? [],
-                            completedIDs: viewModel.completedIDs
+                            completedIDs: viewModel.completedIDs,
+                            navIndexFor: { viewModel.navIndex(forID: $0) }
                         )
                     }
                 }
@@ -151,6 +167,7 @@ struct LessonAccordion: View {
     let lesson: Lesson
     let topics: [Topic]
     let completedIDs: Set<Int>
+    var navIndexFor: (Int) -> Int? = { _ in nil }
 
     @State private var isExpanded = false
 
@@ -164,7 +181,7 @@ struct LessonAccordion: View {
                 VStack(spacing: 0) {
                     Divider().background(Theme.border)
                     ForEach(Array(topics.enumerated()), id: \.element.id) { tIdx, topic in
-                        NavigationLink(value: TopicDestination(topic: topic)) {
+                        NavigationLink(value: ContentNav(index: navIndexFor(topic.id) ?? 0)) {
                             TopicRow(
                                 index: tIdx + 1,
                                 topic: topic,
@@ -203,7 +220,7 @@ struct LessonAccordion: View {
             }
             .buttonStyle(.plain)
         } else {
-            NavigationLink(value: lesson) {
+            NavigationLink(value: ContentNav(index: navIndexFor(lesson.id) ?? 0)) {
                 headerContent
             }
             .buttonStyle(.plain)
@@ -300,10 +317,6 @@ struct TopicRow: View {
         .padding(.leading, 6)
         .contentShape(Rectangle())
     }
-}
-
-struct TopicDestination: Hashable {
-    let topic: Topic
 }
 
 struct LessonRow: View {

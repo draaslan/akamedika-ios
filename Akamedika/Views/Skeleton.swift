@@ -97,8 +97,13 @@ struct SkeletonProfile: View {
                 Circle()
                     .fill(Theme.surfaceElevated)
                     .frame(width: 110, height: 110)
-                SkeletonBlock(height: 22, widthFraction: 0.5)
-                SkeletonBlock(height: 14, widthFraction: 0.25)
+                // Fixed-width, centered to match the real (centered) name & role.
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(Theme.surfaceElevated)
+                    .frame(width: 170, height: 22)
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(Theme.surfaceElevated)
+                    .frame(width: 90, height: 16)
             }
             .padding(.top, 20)
 

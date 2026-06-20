@@ -24,7 +24,7 @@ enum APIError: LocalizedError {
 final class APIClient {
     static let shared = APIClient()
 
-    let baseURL = "https://afb3-176-89-232-107.ngrok-free.app/wp-json"
+    let baseURL = "https://akamedika.com/wp-json"
 
     /// The public origin (scheme+host) used for serving media. WordPress returns
     /// URLs using its internal site URL (e.g. https://akamedika-new.test) which
@@ -33,7 +33,7 @@ final class APIClient {
         URL(string: baseURL).flatMap { url -> String? in
             guard let scheme = url.scheme, let host = url.host else { return nil }
             return "\(scheme)://\(host)"
-        } ?? "https://afb3-176-89-232-107.ngrok-free.app"
+        } ?? "https://akamedika.com"
     }
 
     /// Known WordPress internal hosts that should be rewritten to `publicOrigin`.
@@ -52,6 +52,22 @@ final class APIClient {
         }
         return urlString
     }
+    /// Invoked when a request fails specifically because the JWT is missing,
+    /// expired, or invalid (HTTP 401/403 with a `jwt_auth_*` error code). The app
+    /// uses this to force a re-login. NOT called for ordinary resource-level 403s
+    /// (e.g. LearnDash's `learndash_rest_forbidden_context`). May fire off the
+    /// main thread — handlers should hop to the main actor.
+    var onSessionExpired: (() -> Void)?
+
+    /// Detects an expired/invalid-token error body and signals session expiry.
+    private func handleAuthFailure(_ data: Data) {
+        struct ErrBody: Decodable { let code: String? }
+        let code = (try? JSONDecoder().decode(ErrBody.self, from: data))?.code
+        if code?.hasPrefix("jwt_auth_") == true {
+            onSessionExpired?()
+        }
+    }
+
     var token: String? {
         didSet {
             if let token {
@@ -84,7 +100,9 @@ final class APIClient {
         guard let http = response as? HTTPURLResponse else { throw APIError.invalidResponse }
         switch http.statusCode {
         case 200...299: return data
-        case 401, 403: throw APIError.unauthorized
+        case 401, 403:
+            handleAuthFailure(data)
+            throw APIError.unauthorized
         default: throw APIError.serverError(http.statusCode)
         }
     }
@@ -125,6 +143,7 @@ final class APIClient {
                 throw APIError.decodingError(error)
             }
         case 401, 403:
+            handleAuthFailure(data)
             throw APIError.unauthorized
         default:
             throw APIError.serverError(httpResponse.statusCode)
