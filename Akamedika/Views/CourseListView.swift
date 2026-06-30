@@ -2,7 +2,7 @@ import SwiftUI
 
 struct CourseListView: View {
     @State private var viewModel = CourseListViewModel()
-    var onLogout: () -> Void
+    @Environment(\.openURL) private var openURL
 
     var body: some View {
         NavigationStack {
@@ -32,21 +32,11 @@ struct CourseListView: View {
                         .scaledToFit()
                         .frame(height: 28)
                 }
-                ToolbarItem(placement: .topBarTrailing) {
-                    NavigationLink(value: ProfileDestination()) {
-                        Image(systemName: "person.crop.circle")
-                            .font(.title3)
-                            .foregroundStyle(Theme.textPrimary)
-                    }
-                }
             }
             .navigationDestination(for: Course.self) { course in
                 LessonListView(course: course) { newProgress in
                     viewModel.updateCourseProgress(courseId: course.id, progress: newProgress)
                 }
-            }
-            .navigationDestination(for: ProfileDestination.self) { _ in
-                ProfileView(onLogout: onLogout)
             }
             .task {
                 await viewModel.fetchCourses()
@@ -112,7 +102,7 @@ struct CourseListView: View {
             Text("Kurs bulunamadı")
                 .font(.title3.bold())
                 .foregroundStyle(Theme.textPrimary)
-            Text("Kayıtlı olduğunuz bir kurs bulunmamaktadır.")
+            Text("Şu anda gösterilecek bir kurs bulunmamaktadır.")
                 .foregroundStyle(Theme.textSecondary)
                 .multilineTextAlignment(.center)
         }
@@ -137,14 +127,33 @@ struct CourseListView: View {
                                    GridItem(.flexible(), spacing: 12)],
                           spacing: 12) {
                     ForEach(viewModel.courses) { course in
-                        NavigationLink(value: course) {
-                            CourseCard(
-                                course: course,
-                                progress: viewModel.progress[course.id],
-                                progressLoaded: viewModel.progressLoaded
-                            )
+                        if viewModel.isEnrolled(course.id) || !viewModel.progressLoaded {
+                            // Enrolled (or still resolving enrollment) — open in-app.
+                            NavigationLink(value: course) {
+                                CourseCard(
+                                    course: course,
+                                    progress: viewModel.progress[course.id],
+                                    progressLoaded: viewModel.progressLoaded,
+                                    isEnrolled: true
+                                )
+                            }
+                            .buttonStyle(.plain)
+                        } else {
+                            // Not enrolled — purchase happens in the browser.
+                            Button {
+                                if let link = course.link, let url = URL(string: link) {
+                                    openURL(url)
+                                }
+                            } label: {
+                                CourseCard(
+                                    course: course,
+                                    progress: nil,
+                                    progressLoaded: true,
+                                    isEnrolled: false
+                                )
+                            }
+                            .buttonStyle(.plain)
                         }
-                        .buttonStyle(.plain)
                     }
                 }
                 .padding(.horizontal, 16)
@@ -157,18 +166,27 @@ struct CourseListView: View {
     }
 }
 
-struct ProfileDestination: Hashable {}
-
 struct CourseCard: View {
     let course: Course
     let progress: CourseProgress?
     var progressLoaded: Bool = true
+    var isEnrolled: Bool = true
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             SquareThumbnail {
                 FillingAsyncImage(url: URL(string: course.featuredMediaURL ?? "")) {
                     placeholder
+                }
+            }
+            .overlay(alignment: .topTrailing) {
+                if !isEnrolled {
+                    Image(systemName: "lock.fill")
+                        .font(.caption2.bold())
+                        .foregroundStyle(.white)
+                        .padding(6)
+                        .background(.black.opacity(0.55), in: Circle())
+                        .padding(8)
                 }
             }
 
@@ -190,7 +208,15 @@ struct CourseCard: View {
 
     @ViewBuilder
     private var progressSection: some View {
-        if !progressLoaded {
+        if !isEnrolled {
+            HStack(spacing: 4) {
+                Image(systemName: "arrow.up.right.square")
+                Text("Kayıtlı değilsiniz")
+            }
+            .font(.caption2.bold())
+            .foregroundStyle(Theme.accent)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        } else if !progressLoaded {
             VStack(alignment: .leading, spacing: 5) {
                 RoundedRectangle(cornerRadius: 3)
                     .fill(Theme.surfaceElevated)

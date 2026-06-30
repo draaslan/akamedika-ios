@@ -599,17 +599,22 @@ struct LearnDashService {
     }
 
     /// Fetches progress for ALL of the user's courses in ONE request instead of
-    /// one request per course. Returns a map of courseID → progress.
-    func fetchAllCourseProgress(userId: Int) async -> [Int: CourseProgress] {
+    /// one request per course. Returns a map of courseID → progress plus the set
+    /// of every course the user is enrolled in (the progress collection endpoint
+    /// only returns rows for enrolled courses). The enrolled set includes courses
+    /// with zero steps, which the progress map omits.
+    func fetchAllCourseProgress(userId: Int) async -> (progress: [Int: CourseProgress], enrolledCourseIDs: Set<Int>) {
         let rows: [UserCourseProgressRow] = (try? await client.request(
             "/ldlms/v2/users/\(userId)/course-progress?per_page=100"
         )) ?? []
         var result: [Int: CourseProgress] = [:]
+        var enrolled = Set<Int>()
         for row in rows {
+            enrolled.insert(row.course)
             guard let total = row.stepsTotal, total > 0 else { continue }
             result[row.course] = CourseProgress(completed: row.stepsCompleted ?? 0, total: total)
         }
-        return result
+        return (result, enrolled)
     }
 
     /// Batch fetch: returns both progress totals and the exact set of completed

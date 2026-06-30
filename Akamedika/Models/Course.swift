@@ -8,9 +8,12 @@ struct Course: Codable, Identifiable, Hashable {
     var featuredMediaURL: String?
     let featuredMediaID: Int?
     let status: String
+    /// Public permalink to the course page on the web. Used to open the course
+    /// in Safari for non-enrolled users (purchase happens in the browser).
+    let link: String?
 
     enum CodingKeys: String, CodingKey {
-        case id, title, excerpt, content, status
+        case id, title, excerpt, content, status, link
         case featuredMediaURL = "featured_media_url"
         case featuredMedia = "featured_media"
         case embedded = "_embedded"
@@ -25,9 +28,10 @@ struct Course: Codable, Identifiable, Hashable {
         status = try c.decodeIfPresent(String.self, forKey: .status) ?? "publish"
         featuredMediaID = try c.decodeIfPresent(Int.self, forKey: .featuredMedia)
         featuredMediaURL = Self.resolveFeaturedMediaURL(from: c)
+        link = APIClient.shared.rewriteMediaURL(try c.decodeIfPresent(String.self, forKey: .link))
     }
 
-    init(id: Int, title: RenderedContent, excerpt: RenderedContent? = nil, content: RenderedContent? = nil, featuredMediaURL: String? = nil, featuredMediaID: Int? = nil, status: String = "publish") {
+    init(id: Int, title: RenderedContent, excerpt: RenderedContent? = nil, content: RenderedContent? = nil, featuredMediaURL: String? = nil, featuredMediaID: Int? = nil, status: String = "publish", link: String? = nil) {
         self.id = id
         self.title = title
         self.excerpt = excerpt
@@ -35,6 +39,7 @@ struct Course: Codable, Identifiable, Hashable {
         self.featuredMediaURL = featuredMediaURL
         self.featuredMediaID = featuredMediaID
         self.status = status
+        self.link = link
     }
 
     func encode(to encoder: Encoder) throws {
@@ -46,6 +51,7 @@ struct Course: Codable, Identifiable, Hashable {
         try c.encodeIfPresent(featuredMediaURL, forKey: .featuredMediaURL)
         try c.encodeIfPresent(featuredMediaID, forKey: .featuredMedia)
         try c.encode(status, forKey: .status)
+        try c.encodeIfPresent(link, forKey: .link)
     }
 
     static func resolveFeaturedMediaURL<K: CodingKey>(from container: KeyedDecodingContainer<K>) -> String? {
