@@ -1,6 +1,7 @@
 import SwiftUI
 import AVKit
 import AVFoundation
+import MediaPlayer
 import UIKit
 
 /// Parses Bunny.net (HLS) videos out of Presto Player lesson HTML so they can be
@@ -9,7 +10,10 @@ import UIKit
 /// brings lock-screen controls, playback speed + Picture-in-Picture for free.
 enum PrestoContent {
     struct Video: Identifiable, Equatable {
-        let id = UUID()
+        // Stable identity (the URL, not a fresh UUID) so re-parsing the same HTML on
+        // a SwiftUI body re-eval doesn't give the ForEach a new id and tear down /
+        // recreate the player — which would spawn a second AVPlayer + audio track.
+        var id: String { url.absoluteString }
         let url: URL
         let title: String?
         let poster: URL?
@@ -68,9 +72,41 @@ enum PrestoContent {
     }
 }
 
+/// Persists per-video playback position so a lesson resumes where the user left
+/// off. Keyed by the video's host + path (not the full URL) because Bunny mints a
+/// fresh signed token on every content fetch, so the query string is unstable.
+enum VideoProgressStore {
+    private static let prefix = "video_progress_"
+
+    private static func key(for url: URL) -> String {
+        // Drop token-like path segments so the key survives token rotation whether
+        // Bunny signs via the query string (path already stable) or via the path.
+        let stable = url.pathComponents.filter { seg in
+            seg != "/" &&
+            !seg.contains("=") &&
+            !seg.lowercased().contains("token") &&
+            !seg.lowercased().contains("expires")
+        }
+        return prefix + (url.host ?? "") + "/" + stable.joined(separator: "/")
+    }
+
+    static func save(_ seconds: Double, for url: URL) {
+        UserDefaults.standard.set(seconds, forKey: key(for: url))
+    }
+
+    static func load(for url: URL) -> Double {
+        UserDefaults.standard.double(forKey: key(for: url))
+    }
+
+    static func clear(for url: URL) {
+        UserDefaults.standard.removeObject(forKey: key(for: url))
+    }
+}
+
 /// A native player for a Bunny HLS stream. Sends the `Referer` that Bunny's token
-/// auth requires, keeps audio playing while locked / backgrounded, and feeds the
-/// lock-screen Now Playing card a title + artwork (the Akamedika logo as fallback).
+/// auth requires, keeps audio playing while the device is locked / backgrounded,
+/// resumes from the last position, and feeds the lock-screen Now Playing card a
+/// title + artwork (the Akamedika logo as fallback).
 struct PrestoVideoPlayer: UIViewControllerRepresentable {
     let url: URL
     var title: String = ""
@@ -98,7 +134,9 @@ struct PrestoVideoPlayer: UIViewControllerRepresentable {
         controller.allowsPictureInPicturePlayback = true
         controller.canStartPictureInPictureAutomaticallyFromInline = true
         controller.speeds = Self.speedOptions
-        context.coordinator.player = player
+
+        context.coordinator.start(player: player, controller: controller, url: url,
+                                  title: title, artworkURL: artworkURL)
 
         loadArtwork(into: item)
         return controller
@@ -107,14 +145,210 @@ struct PrestoVideoPlayer: UIViewControllerRepresentable {
     func updateUIViewController(_ controller: AVPlayerViewController, context: Context) {}
 
     static func dismantleUIViewController(_ controller: AVPlayerViewController, coordinator: Coordinator) {
-        // Stop audio when the screen is dismissed (locking the device does NOT
-        // dismantle the view, so locked playback keeps running).
+        // Persist the final position, then stop audio when the screen is dismissed
+        // (locking the device does NOT dismantle the view, so locked playback keeps
+        // running).
+        coordinator.saveProgress()
+        coordinator.teardown()
         controller.player?.pause()
         controller.player = nil
     }
 
     func makeCoordinator() -> Coordinator { Coordinator() }
-    final class Coordinator { var player: AVPlayer? }
+
+    /// Keeps audio alive on lock by detaching the player from the
+    /// `AVPlayerViewController` when backgrounded (the standalone `AVPlayer` keeps
+    /// playing; the VC would otherwise pause it) and reattaching on foreground.
+    ///
+    /// The lock-screen card is owned by an explicit `MPNowPlayingSession` built
+    /// around our player. We publish title / artwork / duration / elapsed onto the
+    /// *session's* own info center (the one the lock screen actually reads — writing
+    /// to `MPNowPlayingInfoCenter.default()` is silently ignored while the session is
+    /// active). Remote commands are wired to that session's command center. The card
+    /// stays live even after we detach the player from the view controller for
+    /// background audio. Also resumes from the last position.
+    final class Coordinator: NSObject {
+        private(set) var player: AVPlayer?
+        private weak var controller: AVPlayerViewController?
+        private var url: URL?
+        private var title = ""
+        private var artwork: MPMediaItemArtwork?
+        private var nowPlayingSession: MPNowPlayingSession?
+        private var timeObserver: Any?
+        private var statusObservation: NSKeyValueObservation?
+        private var rateObservation: NSKeyValueObservation?
+        private var didSeek = false
+
+        func start(player: AVPlayer, controller: AVPlayerViewController, url: URL,
+                   title: String, artworkURL: URL?) {
+            self.player = player
+            self.controller = controller
+            self.url = url
+            self.title = title
+
+            statusObservation = player.currentItem?.observe(\.status) { [weak self] item, _ in
+                guard let self, item.status == .readyToPlay else { return }
+                if !self.didSeek {
+                    self.didSeek = true
+                    self.seekToSavedPosition(duration: item.duration.seconds)
+                }
+                self.updateNowPlayingInfo()
+            }
+
+            rateObservation = player.observe(\.rate) { [weak self] _, _ in
+                self?.updateNowPlayingInfo()
+            }
+
+            let interval = CMTime(seconds: 5, preferredTimescale: 1)
+            timeObserver = player.addPeriodicTimeObserver(forInterval: interval, queue: .main) { [weak self] _ in
+                self?.saveProgress()
+                self?.updateNowPlayingInfo()
+            }
+
+            setupNowPlayingSession(player: player)
+            loadNowPlayingArtwork(artworkURL)
+
+            let center = NotificationCenter.default
+            center.addObserver(self, selector: #selector(didEnterBackground),
+                               name: UIApplication.didEnterBackgroundNotification, object: nil)
+            center.addObserver(self, selector: #selector(willEnterForeground),
+                               name: UIApplication.willEnterForegroundNotification, object: nil)
+        }
+
+        // MARK: - Resume
+
+        private func seekToSavedPosition(duration: Double) {
+            guard let url, let player else { return }
+            let saved = VideoProgressStore.load(for: url)
+            guard saved > 3 else { return }
+            if duration.isFinite, saved >= duration - 5 {
+                VideoProgressStore.clear(for: url)
+                return
+            }
+            // Tolerant seek (not .zero) — precise seeking is slow/unreliable on HLS.
+            player.seek(to: CMTime(seconds: saved, preferredTimescale: 600)) { [weak self] _ in
+                self?.updateNowPlayingInfo()
+            }
+        }
+
+        func saveProgress() {
+            guard let url, let player, let item = player.currentItem else { return }
+            let t = player.currentTime().seconds
+            guard t.isFinite, t > 0 else { return }
+            let duration = item.duration.seconds
+            if duration.isFinite, t >= duration - 5 {
+                VideoProgressStore.clear(for: url)
+            } else {
+                VideoProgressStore.save(t, for: url)
+            }
+        }
+
+        // MARK: - Lock-screen Now Playing
+
+        private func setupNowPlayingSession(player: AVPlayer) {
+            let session = MPNowPlayingSession(players: [player])
+            // We publish the info ourselves (title + artwork included), so turn off
+            // the automatic publisher that would otherwise overwrite it with timing
+            // only and drop our metadata.
+            session.automaticallyPublishesNowPlayingInfo = false
+            self.nowPlayingSession = session
+
+            let c = session.remoteCommandCenter
+            c.playCommand.addTarget { [weak self] _ in
+                guard let p = self?.player else { return .commandFailed }
+                p.play(); return .success
+            }
+            c.pauseCommand.addTarget { [weak self] _ in
+                guard let p = self?.player else { return .commandFailed }
+                p.pause(); return .success
+            }
+            c.togglePlayPauseCommand.addTarget { [weak self] _ in
+                guard let p = self?.player else { return .commandFailed }
+                if p.rate == 0 { p.play() } else { p.pause() }
+                return .success
+            }
+            c.changePlaybackPositionCommand.addTarget { [weak self] event in
+                guard let p = self?.player,
+                      let e = event as? MPChangePlaybackPositionCommandEvent else { return .commandFailed }
+                p.seek(to: CMTime(seconds: e.positionTime, preferredTimescale: 600))
+                return .success
+            }
+            for skip in [c.skipForwardCommand, c.skipBackwardCommand] { skip.preferredIntervals = [15] }
+            c.skipForwardCommand.addTarget { [weak self] _ in self?.skip(by: 15); return .success }
+            c.skipBackwardCommand.addTarget { [weak self] _ in self?.skip(by: -15); return .success }
+
+            session.becomeActiveIfPossible()
+            updateNowPlayingInfo()
+        }
+
+        private func skip(by seconds: Double) {
+            guard let player else { return }
+            let target = max(0, player.currentTime().seconds + seconds)
+            player.seek(to: CMTime(seconds: target, preferredTimescale: 600)) { [weak self] _ in
+                self?.updateNowPlayingInfo()
+            }
+        }
+
+        private func updateNowPlayingInfo() {
+            if !Thread.isMainThread {
+                DispatchQueue.main.async { [weak self] in self?.updateNowPlayingInfo() }
+                return
+            }
+            guard let session = nowPlayingSession, let player, let item = player.currentItem else { return }
+            var info: [String: Any] = [
+                MPMediaItemPropertyTitle: title.isEmpty ? "Akamedika" : title,
+                MPNowPlayingInfoPropertyElapsedPlaybackTime: player.currentTime().seconds,
+                MPNowPlayingInfoPropertyPlaybackRate: player.rate
+            ]
+            let duration = item.duration.seconds
+            if duration.isFinite { info[MPMediaItemPropertyPlaybackDuration] = duration }
+            if let artwork { info[MPMediaItemPropertyArtwork] = artwork }
+            let center = session.nowPlayingInfoCenter
+            center.nowPlayingInfo = info
+            center.playbackState = player.rate > 0 ? .playing : .paused
+        }
+
+        private func loadNowPlayingArtwork(_ artworkURL: URL?) {
+            Task {
+                let image = await PrestoVideoPlayer.downloadImage(artworkURL)
+                    ?? PrestoVideoPlayer.fallbackArtwork()
+                guard let image else { return }
+                await MainActor.run {
+                    self.artwork = MPMediaItemArtwork(boundsSize: image.size) { _ in image }
+                    self.updateNowPlayingInfo()
+                }
+            }
+        }
+
+        // MARK: - Background keep-alive
+
+        @objc private func didEnterBackground() {
+            saveProgress()
+            // Detach so AVPlayerViewController doesn't pause the player; audio continues.
+            // The MPNowPlayingSession still references the player, so the lock-screen
+            // card keeps publishing and the controls stay live.
+            if controller?.player != nil { controller?.player = nil }
+            updateNowPlayingInfo()
+        }
+
+        @objc private func willEnterForeground() {
+            if controller?.player == nil { controller?.player = player }
+        }
+
+        func teardown() {
+            if let timeObserver, let player { player.removeTimeObserver(timeObserver) }
+            timeObserver = nil
+            statusObservation?.invalidate()
+            statusObservation = nil
+            rateObservation?.invalidate()
+            rateObservation = nil
+            NotificationCenter.default.removeObserver(self)
+            nowPlayingSession?.nowPlayingInfoCenter.nowPlayingInfo = nil
+            nowPlayingSession = nil
+        }
+
+        deinit { teardown() }
+    }
 
     // MARK: - Playback speed
 
